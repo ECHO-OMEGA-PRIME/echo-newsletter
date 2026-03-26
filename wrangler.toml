@@ -1,0 +1,30 @@
+name = "echo-newsletter"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "echo-newsletter"
+database_id = "48dfcd61-1b91-45e0-b8df-e75c4a0ac573"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "aafe1fb2cd344c7ba70b183a6810af3b"
+
+[vars]
+ENVIRONMENT = "production"
+
+[[services]]
+binding = "ENGINE_RUNTIME"
+service = "echo-engine-runtime"
+
+[[services]]
+binding = "EMAIL_SENDER"
+service = "echo-email-sender"
+
+[[services]]
+binding = "SHARED_BRAIN"
+service = "echo-shared-brain"
+
+[triggers]
+crons = ["0 6 * * *"]
