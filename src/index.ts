@@ -53,7 +53,7 @@ export default {
     const m = req.method;
 
     // ── Public endpoints ──
-    if (p === '/health') return json({ status: 'healthy', service: 'echo-newsletter', version: '1.0.0', timestamp: new Date().toISOString() });
+    if (p === '/health' || p === '/') return json({ status: 'healthy', service: 'echo-newsletter', version: '1.0.0', timestamp: new Date().toISOString() });
     if (p === '/status') { const r = await env.DB.prepare('SELECT COUNT(*) as c FROM tenants').first<{c:number}>(); return json({ tenants: r?.c || 0 }); }
 
     // ── Subscriber public endpoints (no auth) ──
