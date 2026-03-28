@@ -51,7 +51,7 @@ async function hashIP(ip: string): string {
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', 'Access-Control-Allow-Headers': '*' } });
     try {
 
@@ -104,11 +104,11 @@ export default {
       const iid = url.searchParams.get('iid');
       if (sid && iid) {
         const tid = url.searchParams.get('tid') || '';
-        (async () => {
+        ctx.waitUntil((async () => {
           await env.DB.prepare('UPDATE sends SET opened_at=COALESCE(opened_at, datetime(\'now\')) WHERE issue_id=? AND subscriber_id=?').bind(iid, sid).run();
           await env.DB.prepare('INSERT INTO events (tenant_id, issue_id, subscriber_id, event_type) VALUES (?, ?, ?, ?)').bind(tid, iid, sid, 'open').run();
           await env.DB.prepare('UPDATE issues SET total_opened = (SELECT COUNT(DISTINCT subscriber_id) FROM sends WHERE issue_id=? AND opened_at IS NOT NULL) WHERE id=?').bind(iid, iid).run();
-        })();
+        })());
       }
       const pixel = new Uint8Array([71,73,70,56,57,97,1,0,1,0,128,0,0,255,255,255,0,0,0,33,249,4,0,0,0,0,0,44,0,0,0,0,1,0,1,0,0,2,2,68,1,0,59]);
       return new Response(pixel, { headers: { 'Content-Type': 'image/gif', 'Cache-Control': 'no-store' } });
@@ -122,11 +122,11 @@ export default {
       if (!dest) return err('Missing url');
       if (sid && iid) {
         const tid = url.searchParams.get('tid') || '';
-        (async () => {
+        ctx.waitUntil((async () => {
           await env.DB.prepare('UPDATE sends SET clicked_at=COALESCE(clicked_at, datetime(\'now\')) WHERE issue_id=? AND subscriber_id=?').bind(iid, sid).run();
           await env.DB.prepare('INSERT INTO events (tenant_id, issue_id, subscriber_id, event_type, metadata) VALUES (?, ?, ?, ?, ?)').bind(tid, iid, sid, 'click', JSON.stringify({ url: dest })).run();
           await env.DB.prepare('UPDATE issues SET total_clicked = (SELECT COUNT(DISTINCT subscriber_id) FROM sends WHERE issue_id=? AND clicked_at IS NOT NULL) WHERE id=?').bind(iid, iid).run();
-        })();
+        })());
       }
       return Response.redirect(dest, 302);
     }
