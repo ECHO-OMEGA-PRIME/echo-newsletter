@@ -279,6 +279,7 @@ export default {
     if (m === 'PUT' && p.match(/^\/api\/issues\/[a-zA-Z0-9-]+$/)) {
       const id = p.split('/')[3];
       const body = await req.json<any>();
+      const ALLOWED_ISSUE_FIELDS: Record<string, boolean> = { title: true, subject_line: true, preview_text: true, content_html: true, content_text: true, status: true, scheduled_at: true, list_id: true };
       const sets: string[] = []; const vals: any[] = [];
       if (body.title) { sets.push('title=?'); vals.push(sanitize(body.title)); }
       if (body.subject_line) { sets.push('subject_line=?'); vals.push(sanitize(body.subject_line)); }
@@ -288,9 +289,13 @@ export default {
       if (body.status) { sets.push('status=?'); vals.push(body.status); }
       if (body.scheduled_at) { sets.push('scheduled_at=?'); vals.push(body.scheduled_at); }
       if (body.list_id) { sets.push('list_id=?'); vals.push(body.list_id); }
+      // Validate all SET clauses use only allowlisted columns
+      for (const s of sets) { const col = s.split('=')[0]; if (!ALLOWED_ISSUE_FIELDS[col]) return err('Invalid field: ' + col); }
       sets.push('updated_at=datetime(\'now\')');
+      if (!sets.length) return err('Nothing to update');
       vals.push(id, tid);
-      await env.DB.prepare(`UPDATE issues SET ${sets.join(',')} WHERE id=? AND tenant_id=?`).bind(...vals).run();
+      const issueUpdateSQL = 'UPDATE issues SET ' + sets.join(',') + ' WHERE id=? AND tenant_id=?';
+      await env.DB.prepare(issueUpdateSQL).bind(...vals).run();
       return json({ ok: true });
     }
     if (m === 'DELETE' && p.match(/^\/api\/issues\/[a-zA-Z0-9-]+$/)) {
@@ -378,14 +383,18 @@ export default {
     if (m === 'PUT' && p.match(/^\/api\/automations\/[a-zA-Z0-9]+$/)) {
       const id = p.split('/')[3];
       const body = await req.json<any>();
+      const ALLOWED_AUTOMATION_FIELDS: Record<string, boolean> = { name: true, steps: true, status: true, trigger_config: true };
       const sets: string[] = []; const vals: any[] = [];
       if (body.name) { sets.push('name=?'); vals.push(sanitize(body.name)); }
       if (body.steps) { sets.push('steps=?'); vals.push(JSON.stringify(body.steps)); }
       if (body.status) { sets.push('status=?'); vals.push(body.status); }
       if (body.trigger_config) { sets.push('trigger_config=?'); vals.push(JSON.stringify(body.trigger_config)); }
       if (!sets.length) return err('Nothing to update');
+      // Validate all SET clauses use only allowlisted columns
+      for (const s of sets) { const col = s.split('=')[0]; if (!ALLOWED_AUTOMATION_FIELDS[col]) return err('Invalid field: ' + col); }
       vals.push(id, tid);
-      await env.DB.prepare(`UPDATE automations SET ${sets.join(',')} WHERE id=? AND tenant_id=?`).bind(...vals).run();
+      const autoUpdateSQL = 'UPDATE automations SET ' + sets.join(',') + ' WHERE id=? AND tenant_id=?';
+      await env.DB.prepare(autoUpdateSQL).bind(...vals).run();
       return json({ ok: true });
     }
 
