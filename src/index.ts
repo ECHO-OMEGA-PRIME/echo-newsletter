@@ -9,6 +9,8 @@ interface Env {
   ECHO_API_KEY: string;
   ENVIRONMENT: string;
   AE: AnalyticsEngineDataset;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
 }
 
 interface RLState { c: number; t: number; }
@@ -22,7 +24,7 @@ function json(data: unknown, status = 200): Response {
 function err(msg: string, status = 400): Response { return json({ error: msg }, status); }
 
 function slog(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) {
-  const entry = { ts: new Date().toISOString(), level, worker: 'echo-newsletter', version: '1.0.0', msg, ...data };
+  const entry = { ts: new Date().toISOString(), level, worker: 'echo-newsletter', version: '2.0.0', msg, ...data };
   if (level === 'error') console.error(JSON.stringify(entry));
   else console.log(JSON.stringify(entry));
 }
@@ -50,6 +52,32 @@ async function hashIP(ip: string): string {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
 }
 
+const NL_PLANS = [
+  { id: 'free', name: 'Free', price: 0, max_subscribers: 500, max_sends_month: 2000, display: 'Free' },
+  { id: 'creator', name: 'Creator', price: 1499, max_subscribers: 5000, max_sends_month: 25000, display: '$14.99/mo' },
+  { id: 'pro', name: 'Pro', price: 4999, max_subscribers: 50000, max_sends_month: 250000, display: '$49.99/mo' },
+  { id: 'enterprise', name: 'Enterprise', price: 14999, max_subscribers: -1, max_sends_month: -1, display: '$149.99/mo' },
+] as const;
+
+async function verifyStripeSignature(payload: string, signature: string, secret: string): Promise<boolean> {
+  const parts = signature.split(',').reduce((acc, part) => {
+    const [key, value] = part.split('=');
+    acc[key] = value;
+    return acc;
+  }, {} as Record<string, string>);
+  const timestamp = parts['t'];
+  const sig = parts['v1'];
+  if (!timestamp || !sig) return false;
+  if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signed = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestamp}.${payload}`));
+  const expected = Array.from(new Uint8Array(signed)).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (expected.length !== sig.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < expected.length; i++) mismatch |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  return mismatch === 0;
+}
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', 'Access-Control-Allow-Headers': '*' } });
@@ -61,7 +89,7 @@ export default {
     try { env.AE.writeDataPoint({ blobs: [m, p, '200'], doubles: [Date.now()], indexes: ['echo-newsletter'] }); } catch {}
 
     // ── Public endpoints ──
-    if (p === '/health' || p === '/') return json({ status: 'healthy', service: 'echo-newsletter', version: '1.0.0', timestamp: new Date().toISOString() });
+    if (p === '/health' || p === '/') return json({ status: 'healthy', service: 'echo-newsletter', version: '2.0.0', stripe: !!env.STRIPE_SECRET_KEY, timestamp: new Date().toISOString() });
     if (p === '/status') { const r = await env.DB.prepare('SELECT COUNT(*) as c FROM tenants').first<{c:number}>(); return json({ tenants: r?.c || 0 }); }
 
     // ── Subscriber public endpoints (no auth) ──
@@ -172,6 +200,79 @@ export default {
       const name = tenant?.name || 'Newsletter';
       const js = `(function(){var d=document,w=d.createElement('div');w.id='echo-nl-widget';w.innerHTML='<div style="font-family:sans-serif;max-width:400px;padding:24px;border-radius:12px;border:1px solid #e2e8f0;background:#fff"><h3 style="margin:0 0 8px;font-size:18px;color:#0f172a">Subscribe to ${name.replace(/'/g, "\\'")}</h3><p style="margin:0 0 16px;font-size:14px;color:#64748b">Get the latest updates delivered to your inbox.</p><form id="echo-nl-form"><input id="echo-nl-email" type="email" placeholder="your@email.com" required style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #e2e8f0;font-size:14px;margin-bottom:8px"/><input id="echo-nl-name" type="text" placeholder="Your name (optional)" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #e2e8f0;font-size:14px;margin-bottom:12px"/><button type="submit" style="width:100%;padding:10px;border-radius:8px;border:none;background:${color};color:#fff;font-size:14px;font-weight:600;cursor:pointer">Subscribe</button></form><p id="echo-nl-msg" style="margin:8px 0 0;font-size:13px;display:none"></p><p style="margin:8px 0 0;font-size:11px;color:#94a3b8;text-align:center">Powered by <a href="https://echo-ept.com/newsletter" style="color:${color};text-decoration:none">Echo Newsletter</a></p></div>';var c=d.currentScript;c.parentNode.insertBefore(w,c.nextSibling);d.getElementById('echo-nl-form').addEventListener('submit',function(e){e.preventDefault();var msg=d.getElementById('echo-nl-msg');var email=d.getElementById('echo-nl-email').value;var name=d.getElementById('echo-nl-name').value;msg.style.display='block';msg.style.color='#64748b';msg.textContent='Subscribing...';fetch(c.src.split('/widget.js')[0]+'/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tenant_id:'${tid}',list_id:'${lid}',email:email,name:name||undefined})}).then(function(r){return r.json()}).then(function(d){if(d.ok){msg.style.color='${color}';msg.textContent='Subscribed! Check your inbox.';}else{msg.style.color='#ef4444';msg.textContent=d.error||'Error';}}).catch(function(){msg.style.color='#ef4444';msg.textContent='Network error';});});})();`;
       return new Response(js, { headers: { 'Content-Type': 'application/javascript', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=300' } });
+    }
+
+    // ── Stripe billing (no auth) ──
+    if (m === 'GET' && p === '/plans') return json({ plans: NL_PLANS });
+
+    if (m === 'POST' && p === '/webhooks/stripe') {
+      const body = await req.text();
+      const sig = req.headers.get('Stripe-Signature') || '';
+      if (env.STRIPE_WEBHOOK_SECRET) {
+        if (!await verifyStripeSignature(body, sig, env.STRIPE_WEBHOOK_SECRET)) {
+          slog('warn', 'Stripe webhook signature failed');
+          return err('Invalid signature', 400);
+        }
+      }
+      const event = JSON.parse(body);
+      slog('info', 'Stripe webhook', { type: event.type });
+      if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const tenantId = session.metadata?.tenant_id;
+        const planId = session.metadata?.plan_id;
+        if (tenantId && planId) {
+          const plan = NL_PLANS.find(p => p.id === planId);
+          if (plan) {
+            await env.DB.prepare('UPDATE tenants SET plan=?, max_subscribers=?, stripe_customer_id=?, stripe_subscription_id=? WHERE id=?')
+              .bind(plan.id, plan.max_subscribers, session.customer, session.subscription, tenantId).run();
+            slog('info', 'Tenant upgraded', { tenantId, plan: plan.id });
+          }
+        }
+      } else if (event.type === 'customer.subscription.deleted') {
+        const sub = event.data.object;
+        await env.DB.prepare("UPDATE tenants SET plan='free', max_subscribers=500, stripe_subscription_id=NULL WHERE stripe_customer_id=?")
+          .bind(sub.customer).run();
+      }
+      await env.DB.prepare("INSERT INTO stripe_events (id, type, data, created_at) VALUES (?, ?, ?, datetime('now'))")
+        .bind(event.id, event.type, JSON.stringify(event.data).slice(0, 4000)).run().catch(() => {});
+      return json({ received: true });
+    }
+
+    if (m === 'POST' && p === '/plans/upgrade') {
+      if (!env.STRIPE_SECRET_KEY) return err('Stripe not configured', 503);
+      const b = await req.json<any>();
+      const tenantId = b.tenant_id;
+      const planId = b.plan_id;
+      const plan = NL_PLANS.find(p => p.id === planId);
+      if (!plan || plan.price === 0) return err('Invalid plan', 400);
+      const params = new URLSearchParams();
+      params.append('mode', 'subscription');
+      params.append('line_items[0][price_data][currency]', 'usd');
+      params.append('line_items[0][price_data][product_data][name]', `Echo Newsletter - ${plan.name}`);
+      params.append('line_items[0][price_data][unit_amount]', plan.price.toString());
+      params.append('line_items[0][price_data][recurring][interval]', 'month');
+      params.append('line_items[0][quantity]', '1');
+      params.append('metadata[tenant_id]', tenantId);
+      params.append('metadata[plan_id]', plan.id);
+      params.append('success_url', b.success_url || 'https://echo-prime-tech.com/newsletter?upgraded=true');
+      params.append('cancel_url', b.cancel_url || 'https://echo-prime-tech.com/newsletter?cancelled=true');
+      const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${btoa(env.STRIPE_SECRET_KEY + ':')}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+      });
+      const session = await resp.json() as any;
+      if (!resp.ok) return err(session.error?.message || 'Stripe error', 400);
+      return json({ url: session.url, session_id: session.id });
+    }
+
+    if (m === 'POST' && p === '/admin/migrate-stripe') {
+      if (!authOk(req, env)) return err('Unauthorized', 401);
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY, type TEXT, data TEXT, created_at TEXT)").run();
+      await env.DB.prepare("ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT").run().catch(() => {});
+      await env.DB.prepare("ALTER TABLE tenants ADD COLUMN stripe_subscription_id TEXT").run().catch(() => {});
+      await env.DB.prepare("ALTER TABLE tenants ADD COLUMN max_subscribers INTEGER DEFAULT 500").run().catch(() => {});
+      return json({ migrated: true });
     }
 
     // ── Authenticated endpoints ──
